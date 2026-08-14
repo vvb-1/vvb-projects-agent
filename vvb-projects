@@ -528,6 +528,88 @@ def cmd_config(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     return 0
 
 
+def cmd_new_repo(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    org = cfg["gh_org"]
+    template = f"{org}/vvb-template"
+    name = args.name
+    target = f"{org}/{name}"
+    visibility = "--private" if args.private else "--public"
+    desc = args.description or f"{name} (scaffolded from {template})"
+    print(f"scaffolding {target} from {template}")
+    r = subprocess.run(
+        ["gh", "repo", "create", target, visibility, "--template", template, "--description", desc, "--clone"],
+        capture_output=True, text=True, timeout=60,
+    )
+    if r.returncode != 0:
+        print(f"gh repo create failed: {r.stderr.strip()}", file=sys.stderr)
+        return 1
+    clone_dir = Path.cwd() / name
+    if not (clone_dir / ".github" / "workflows" / "ci.yml").exists():
+        print(f"WARN: {target} cloned but template files missing", file=sys.stderr)
+    print(f"OK {target} scaffolded at {clone_dir}")
+    return 0
+
+
+def cmd_init_bot(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    print(f"""
+GitHub App: vvb-crab-bot (single App, all permissions)
+======================================================
+
+ONE-TIME SETUP (manual, web-only):
+
+1. Open https://github.com/organizations/vvb-1/settings/apps/new
+   (or personal settings if vvb-1 isn't an org).
+
+2. Fill in:
+   - GitHub App name: vvb-crab-bot
+   - Description: VVB unified bot — review, issues, hygiene, depends
+   - Homepage URL: https://github.com/vvb-1
+   - Webhook: leave UNCHECKED (we poll via API)
+
+3. Repository permissions (tick only these):
+   - Issues: Read & Write
+   - Pull requests: Read & Write
+   - Checks: Read
+   - Contents: Read & Write (for bot commits)
+   - Metadata: Read (mandatory)
+
+4. Organization permissions:
+   - Members: Read
+   - Plan: Read
+
+5. Subscribe to events:
+   - Issue comment, Issues, Pull request, Pull request review
+
+6. Create. You'll get an App ID and a private key (.pem).
+
+7. Install the App on {args.repo} (and other repos you want bot on).
+
+8. Store the private key:
+   mkdir -p ~/.config/vvb-bot
+   mv ~/Downloads/vvb-crab-bot.*.pem ~/.config/vvb-bot/private-key.pem
+   chmod 600 ~/.config/vvb-bot/private-key.pem
+
+9. Add the App ID and installation ID to vvb-env:
+   VVB_BOT_APP_ID=<id>
+   VVB_BOT_INSTALLATION_ID=<id>
+   VVB_BOT_PRIVATE_KEY=/home/krily/.config/vvb-bot/private-key.pem
+
+10. Authenticate the App from any tool:
+    python3 -c "import os; print(open(os.environ['VVB_BOT_PRIVATE_KEY']).read())"  # check
+""")
+    return 0
+
+
+def cmd_setup_template(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    target = f"{cfg['gh_org']}/vvb-template"
+    r = subprocess.run(["gh", "repo", "edit", target, "--template"], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        print(f"gh repo edit failed: {r.stderr.strip()}", file=sys.stderr)
+        return 1
+    print(f"OK {target} marked as template repo")
+    return 0
+
+
 # ---------- main ----------
 
 def main(argv: list[str] | None = None) -> int:
@@ -540,8 +622,18 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("scan", help="scan all repos for leaked secrets").add_argument("--repo", default=None)
     sub.add_parser("structure", help="find missing CLAUDE.md / empty dirs / thin READMEs").add_argument("--repo", default=None)
     sub.add_parser("fix", help="apply safe non-breaking fixes from config")
-    sub.add_parser("report", help="single report -> NTFY/Telegram")
+    sub.add_parser("report", help="one-shot summary -> NTFY/Telegram")
     sub.add_parser("watch", help="long-running report loop")
+
+    pn = sub.add_parser("new-repo", help="scaffold a new repo from vvb-template")
+    pn.add_argument("name", help="new repo name (under gh_org)")
+    pn.add_argument("--private", action="store_true", help="create as private")
+    pn.add_argument("--description", default="", help="repo description")
+
+    pb = sub.add_parser("init-bot", help="print GitHub App installation instructions")
+    pb.add_argument("--repo", default="vvb-1/vvb-template", help="repo with the bot config")
+
+    sub.add_parser("setup-template", help="mark a repo as a template repo (one-off)")
 
     pc = sub.add_parser("config", help="show or validate config")
     pc.add_argument("action", choices=["show", "validate"])
@@ -553,7 +645,8 @@ def main(argv: list[str] | None = None) -> int:
     handlers = {
         "sync": cmd_sync, "scan": cmd_scan, "structure": cmd_structure,
         "fix": cmd_fix, "report": cmd_report, "watch": cmd_watch,
-        "config": cmd_config,
+        "config": cmd_config, "new-repo": cmd_new_repo, "init-bot": cmd_init_bot,
+        "setup-template": cmd_setup_template,
     }
     return handlers[args.cmd](args, cfg)
 
