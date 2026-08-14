@@ -1,0 +1,62 @@
+# vvb-projects-agent — config example
+
+# Where local clones live on this host.
+repos_dir: /home/krily/Projects
+
+# GitHub org to monitor (and to auto-discover repos from).
+gh_org: vvb-1
+
+# Hostname of the primary controller (used by cron-watch scripts on peers).
+controller_host: calm-narwhal
+
+auto_fix:
+  safe: true                 # master switch for non-breaking auto-fixes
+  breaking: false             # MUST be explicitly true to enable force-push, branch-delete, secret-redact
+  gitignore_add: true         # suggest .gitignore lines for tracked files that look like secrets
+  prune_empty_dirs: true      # delete directories under repos_dir that have no content
+  dedup_clones: false         # detect duplicate clones of the same upstream repo
+  secret_redact: false        # rewrite files to remove detected secrets (DANGEROUS, opt-in only)
+
+scan:
+  secret_patterns: true
+  ignore_globs:
+    - .git/**
+    - node_modules/**
+    - .venv/**
+    - dist/**
+    - build/**
+    - __pycache__/**
+    - target/**
+  max_file_mb: 10
+
+structure:
+  require_claudemd: true
+  require_changelogmd: false
+  min_readme_bytes: 100
+
+channels:
+  ntfy:
+    enabled: true
+    server: https://ntfy.sh
+    # Topic name = vvb-projects-<sha256-of-hostname[:8]>; subscribe from phone via NTFY app
+    topic: ""  # auto-generated on first run; overrides here are accepted
+  telegram:
+    enabled: false
+    chat_id: ""             # TG chat id (group or user)
+    bot_token_env: ""       # env var name holding the bot token (e.g. VVB_TG_BOT_TOKEN)
+
+# How often the `watch` subcommand emits a report (seconds).
+watch_interval_sec: 3600
+
+# Local state database (findings, run log).
+state_db: /home/krily/.local/share/vvb-projects/state.sqlite
+
+
+# Features explicitly listed here so nothing slips through silently:
+#  - sync:               git fetch + ff-merge on every tracked repo
+#  - scan:               secret-pattern scan (read-only)
+#  - structure:          missing CLAUDE.md / thin README / empty dirs
+#  - fix:                safe non-breaking cleanup (driven by auto_fix.* flags above)
+#  - report:             one-shot NTFY/Telegram summary
+#  - watch:              long-running report loop (intended for cron on each host)
+#  - config show/validate: dump config / fail-fast on missing keys
