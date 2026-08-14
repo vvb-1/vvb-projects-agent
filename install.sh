@@ -29,6 +29,20 @@ mkdir -p "${INSTALL_DIR}" "${BIN_DIR}" "${CONFIG_DIR}"
 
 # Refresh the binary source.
 if [ -d "${INSTALL_DIR}/.git" ]; then
+  if [ -n "$(git -C "${INSTALL_DIR}" status --porcelain)" ]; then
+    say "WARNING: ${INSTALL_DIR} has local modifications."
+    say "Aborting auto-update to preserve local bugfixes."
+    say "Commit/stash them upstream first, then re-run install.sh."
+    if [ -t 0 ]; then
+      read -rp "Continue anyway and discard local changes? [y/N] " ans
+      case "${ans}" in
+        y|Y|yes|YES) ;;
+        *) die "aborted by user." ;;
+      esac
+    else
+      die "non-interactive shell — refusing to discard local changes."
+    fi
+  fi
   git -C "${INSTALL_DIR}" fetch --depth=1 origin "${REF}" >/dev/null
   git -C "${INSTALL_DIR}" reset --hard "origin/${REF}" >/dev/null
 else

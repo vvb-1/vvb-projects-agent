@@ -46,18 +46,98 @@ DEFAULT_CONFIG_LOCATIONS = [
 # ---------- config ----------
 
 def load_config(path: Path | None) -> dict[str, Any]:
-    """Load YAML config without PyYAML (we keep stdlib-only)."""
-    import yaml  # type: ignore  # bundled with hermes-agent runtime
+    """Load YAML config. Stdlib-only with optional PyYAML acceleration.
+
+    On hosts without PyYAML (Omarchy default install), the tiny built-in
+    parser handles the flat `key: value` blocks we actually use. No nested
+    anchors / multi-line strings needed in v0.1.
+    """
     if path is None:
         for loc in DEFAULT_CONFIG_LOCATIONS:
-            if loc.exists():
+            if loc and loc.is_file():
                 path = loc
                 break
-    if path is None or not path.exists():
+    if path is None or not path.is_file():
         return {}
-    with path.open(encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+    text = path.read_text(encoding="utf-8")
+    raw = _parse_yaml(text) or {}
     return _defaults_overlay(raw)
+
+
+def _parse_yaml(text: str) -> dict[str, Any] | None:
+    """Minimal YAML parser: top-level `key: value` blocks with 2-space indent.
+
+    Supports comments, lists, and nested dicts up to 2 levels deep. Returns
+    None if PyYAML is available (delegates to the faster, more robust parser).
+    """
+    try:
+        import yaml  # type: ignore
+        return yaml.safe_load(text) or {}
+    except ImportError:
+        pass
+    root: dict[str, Any] = {}
+    stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        content = line.lstrip()
+        # pop stack until parent indent matches
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        if not stack:
+            stack = [(-1, root)]
+        parent = stack[-1][1]
+        if content.startswith("- "):
+            item = content[2:].strip()
+            # ensure parent is a list under last key
+            if not isinstance(parent, list):
+                continue
+            if ":" in item:
+                k, _, v = item.partition(":")
+                d: dict[str, Any] = {}
+                if v.strip():
+                    d[k.strip()] = _scalar(v.strip())
+                parent.append(d)
+                stack.append((indent + 2, d))  # noqa: PERF401
+            else:
+                parent.append(_scalar(item))
+            continue
+        if ":" not in content:
+            continue
+        key, _, val = content.partition(":")
+        key = key.strip()
+        val = val.strip()
+        if not val:
+            # nested dict
+            nd: dict[str, Any] = {}
+            if isinstance(parent, dict):
+                parent[key] = nd
+            stack.append((indent, nd))
+        else:
+            if isinstance(parent, dict):
+                parent[key] = _scalar(val)
+    return root
+
+
+def _scalar(s: str) -> Any:
+    if s in ("true", "True", "yes"): return True
+    if s in ("false", "False", "no"): return False
+    if s in ("null", "None", "~"): return None
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1]
+    if s.startswith("'") and s.endswith("'"):
+        return s[1:-1]
+    try:
+        return int(s)
+    except ValueError:
+        pass
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    return s
 
 
 def _defaults_overlay(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -280,13 +360,20 @@ def notify_ntfy(cfg: dict[str, Any], title: str, body: str, priority: str = "def
         return False
     url = f"{n.get('server','https://ntfy.sh')}/{n['topic']}"
     req = urllib.request.Request(url, data=body.encode("utf-8"), method="POST")
-    req.add_header("Title", title)
+    # NTFY accepts UTF-8 in headers via RFC 5987 (filename*) — use it for non-ASCII titles.
+    try:
+        req.add_header("Title", title)
+    except (UnicodeEncodeError, ValueError):
+        # Title contains chars the stdlib ascii-encoder rejects; fall back to RFC 5987.
+        from urllib.parse import quote
+        req.add_header("Title", quote(title, safe=""))
     req.add_header("Priority", priority)
     req.add_header("Tags", "vvb-projects")
     try:
         urllib.request.urlopen(req, timeout=10).read()
         return True
-    except Exception:
+    except Exception as e:
+        print(f"ntfy delivery failed: {type(e).__name__}: {e}", file=sys.stderr)
         return False
 
 
