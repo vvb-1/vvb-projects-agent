@@ -91,7 +91,18 @@ def _parse_yaml(text: str) -> dict[str, Any] | None:
         parent = stack[-1][1]
         if content.startswith("- "):
             item = content[2:].strip()
-            # ensure parent is a list under last key
+            # A key without a value creates an empty dict; when its first child
+            # is a list item, convert it to a list in the grandparent.
+            if isinstance(parent, dict) and not parent and len(stack) >= 2:
+                gp = stack[-2][1]
+                if isinstance(gp, dict):
+                    for k, v in gp.items():
+                        if v is parent:
+                            new_list: list[Any] = []
+                            gp[k] = new_list
+                            stack[-1] = (stack[-1][0], new_list)
+                            parent = new_list
+                            break
             if not isinstance(parent, list):
                 continue
             if ":" in item:
@@ -360,13 +371,11 @@ def notify_ntfy(cfg: dict[str, Any], title: str, body: str, priority: str = "def
         return False
     url = f"{n.get('server','https://ntfy.sh')}/{n['topic']}"
     req = urllib.request.Request(url, data=body.encode("utf-8"), method="POST")
-    # NTFY accepts UTF-8 in headers via RFC 5987 (filename*) — use it for non-ASCII titles.
-    try:
-        req.add_header("Title", title)
-    except (UnicodeEncodeError, ValueError):
-        # Title contains chars the stdlib ascii-encoder rejects; fall back to RFC 5987.
-        from urllib.parse import quote
-        req.add_header("Title", quote(title, safe=""))
+    # HTTP headers are latin-1 in http.client; the encode error surfaces at
+    # urlopen(), not add_header(), so a try around add_header catches nothing.
+    # Fold the title to latin-1-safe text up front.
+    safe_title = title.encode("latin-1", "replace").decode("latin-1")
+    req.add_header("Title", safe_title)
     req.add_header("Priority", priority)
     req.add_header("Tags", "vvb-projects")
     try:
