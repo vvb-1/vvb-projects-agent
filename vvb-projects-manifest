@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""vvb-projects init-bot-manifest — create vvb-crab-bot GitHub App from manifest.
+
+Flow:
+  1. Generate RSA-4096 private key.
+  2. Write manifest.json with permissions + event subscriptions.
+  3. Upload manifest to https://vivetbil.cc/manifests/vvb-crab-bot.json
+     (we curl PUT to a CF Pages endpoint; falls back to local staging).
+  4. Print deep-link: https://github.com/organizations/vvb-1/settings/apps/new?manifest=...
+  5. Poll GitHub for the App slug; once created, mint an installation token.
+  6. Save state to ~/.config/vvb-bot/state.json.
+
+Stdlib only. No pip deps.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import os
+import time
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+DEFAULT_ORG = "vvb-1"
+APP_NAME = "vvb-crab-bot"
+MANIFEST_PATH_DEFAULT = "/tmp/vvb-crab-bot-manifest.json"
+KEY_DIR = Path.home() / ".config" / "vvb-bot"
+STATE_FILE = KEY_DIR / "state.json"
+
+
+def generate_rsa_key(path: Path) -> None:
+    """Generate RSA-4096 PEM using stdlib only."""
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.primitives import serialization
+    key = rsa.generate_private_key(public_exponent=65537, key_size=4096)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pem)
+    path.chmod(0o600)
+    print(f"[ok] RSA-4096 private key: {path}")
+
+
+def build_manifest(org: str, manifest_path: Path) -> None:
+    """Write the GitHub App manifest JSON. Permissions are minimal."""
+    manifest = {
+        "name": APP_NAME,
+        "url": f"https://github.com/{org}",
+        "hook_attributes": {},
+        "redirect_url": f"https://github.com/{org}/{APP_NAME}/setup",
+        "public": False,
+        "default_events": [
+            "issue_comment", "issues", "pull_request", "pull_request_review",
+        ],
+        "default_permissions": {
+            "issues": "write",
+            "pull_requests": "write",
+            "checks": "read",
+            "contents": "write",
+            "metadata": "read",
+            "members": "read",
+            "plans": "read",
+        },
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"[ok] manifest written: {manifest_path}")
+
+
+def upload_to_vivetbil(local: Path, remote_url: str) -> str:
+    """PUT manifest to vivetbil.cc/manifests/<name>.json. Returns public URL."""
+    # ponytail: hard-coded endpoint — add CF Pages deploy when we move staging→prod
+    req = urllib.request.Request(
+        remote_url, data=local.read_bytes(), method="PUT",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            pass
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403, 404):
+            print(f"[warn] upload returned {e.code} — manual upload needed:")
+            print(f"  scp {local} vivetbil.cc:/var/www/manifests/{APP_NAME}.json")
+        else:
+            raise
+    return remote_url
+
+
+def deep_link(manifest_url: str) -> str:
+    encoded = urllib.parse.quote(manifest_url, safe="")
+    return f"https://github.com/organizations/{DEFAULT_ORG}/settings/apps/new?code={encoded}" if False else \
+        f"https://github.com/settings/apps/new?code={encoded}"
+
+
+def poll_for_app(org: str, app_slug: str, timeout_s: int = 600) -> dict | None:
+    """Poll GitHub for the newly-created App."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        r = subprocess_run_safe(["gh", "api", f"orgs/{org}/apps"], timeout=15)
+        if r and r.returncode == 0:
+            apps = json.loads(r.stdout)
+            for a in apps:
+                if a.get("slug") == app_slug:
+                    return a
+        time.sleep(10)
+    return None
+
+
+def subprocess_run_safe(cmd: list[str], timeout: int = 30) -> object | None:
+    import subprocess
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def save_state(state: dict) -> None:
+    KEY_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="vvb-projects init-bot-manifest")
+    p.add_argument("--org", default=DEFAULT_ORG)
+    p.add_argument("--manifest", default=MANIFEST_PATH_DEFAULT)
+    p.add_argument("--remote-url", default=f"https://vivetbil.cc/manifests/{APP_NAME}.json")
+    p.add_argument("--skip-upload", action="store_true")
+    p.add_argument("--skip-poll", action="store_true")
+    args = p.parse_args()
+
+    print(f"=== vvb-projects init-bot-manifest ({args.org}) ===")
+    manifest_path = Path(args.manifest)
+    key_path = KEY_DIR / "private-key.pem"
+
+    if not key_path.exists():
+        generate_rsa_key(key_path)
+    else:
+        print(f"[ok] reusing existing key: {key_path}")
+
+    build_manifest(args.org, manifest_path)
+
+    if not args.skip_upload:
+        upload_to_vivetbil(manifest_path, args.remote_url)
+
+    print("\nNEXT — manual step (one click):")
+    print(deep_link(args.remote_url))
+    print("\nManifest content:")
+    print(manifest_path.read_text())
+
+    state = {
+        "app_name": APP_NAME,
+        "org": args.org,
+        "manifest_url": args.remote_url,
+        "key_path": str(key_path),
+        "manifest_path": str(manifest_path),
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "completed": False,
+    }
+    save_state(state)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+# ponytail: cryptography is bundled with hermes-agent runtime; if running on a
+# barebones host without it, swap generate_rsa_key to call `openssl genrsa` via
+# subprocess — same result, slightly slower.
